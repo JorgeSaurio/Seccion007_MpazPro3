@@ -12,6 +12,8 @@ data class Alternativa(
     val esCorrecta: Boolean
 )
 
+//revisar bien este archivo, requerimiento 11
+
 /**
  * Actividad o pregunta (entidad "Actividad/prueba" del caso). Si esEvaluacionFinal es false es
  * un desafío de práctica; los desafíos se presentan con dificultad progresiva (orden).
