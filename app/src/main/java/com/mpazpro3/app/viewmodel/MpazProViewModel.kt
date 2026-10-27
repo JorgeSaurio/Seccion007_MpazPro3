@@ -1,6 +1,16 @@
 package com.mpazpro3.app.viewmodel
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.mpazpro3.app.data.local.AppDatabase
+import com.mpazpro3.app.data.repository.DesafioRepository
+import com.mpazpro3.app.model.esRespuestaCorrecta
+import com.mpazpro3.app.model.filtrarYOrdenarDesafios
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import com.mpazpro3.app.data.MockData
 import com.mpazpro3.app.model.Actividad
 import com.mpazpro3.app.model.Asignacion
@@ -26,7 +36,20 @@ import kotlinx.coroutines.flow.asStateFlow
  * Requerimientos_Seccion007 al que corresponde. Mientras no se implemente, las listas se
  * muestran sin filtrar y las acciones (aprobar, asignar, responder, validar) no cambian nada.
  */
-class MpazProViewModel : ViewModel() {
+class MpazProViewModel(application: Application) : AndroidViewModel(application) {
+
+    // =====================================================================
+    // RF-08: acceso a Room
+    // =====================================================================
+
+    // AndroidViewModel entrega "application", que es el Context para abrir la base.
+    // (AppNavigation crea el ViewModel con viewModel(): funciona igual, no hay que tocarlo.)
+    private val desafioRepository = DesafioRepository(AppDatabase.getInstance(application))
+
+    init {
+        // La primera vez que se abre la app, copia las actividades de MockData a Room.
+        viewModelScope.launch { desafioRepository.cargarDatosIniciales() }
+    }
 
     // =====================================================================
     // Autenticación
@@ -73,7 +96,14 @@ class MpazProViewModel : ViewModel() {
     val contenidos: StateFlow<List<Contenido>> = _contenidos.asStateFlow()
 
     private val _recursos = MutableStateFlow(MockData.recursos)
-    private val _actividades = MutableStateFlow(MockData.actividades)
+    // RF-08: las actividades vienen de Room y quedan en memoria como StateFlow.
+    // - filter: ignora la lista vacía del primer arranque (antes de la carga inicial).
+    // - Eagerly: empieza a leer de inmediato. Es necesario porque desafiosDe() lee .value
+    //   directamente y nadie hace collect; con WhileSubscribed nunca se llenaría.
+    // - MockData.actividades: valor inicial mientras Room responde (son los mismos datos).
+    private val _actividades: StateFlow<List<Actividad>> = desafioRepository.actividades
+        .filter { it.isNotEmpty() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, MockData.actividades)
 
     private val _asignaciones = MutableStateFlow(MockData.asignaciones)
     val asignaciones: StateFlow<List<Asignacion>> = _asignaciones.asStateFlow()
@@ -215,16 +245,32 @@ class MpazProViewModel : ViewModel() {
     }
 
     /**
-     * TODO(equipo): devolver los desafíos del contenido (sin la evaluación final), ordenados
-     * por dificultad progresiva. Hoy devuelve TODAS las actividades, sin filtrar ni ordenar.
+     * RF-08: desafíos del contenido, SIN la evaluación final, ordenados de Fácil a Difícil y
+     * luego por "orden". La regla está en model/ReglasDesafio.kt (probada con tests).
      */
-    fun desafiosDe(contenidoId: String?): List<Actividad> = _actividades.value
+    fun desafiosDe(contenidoId: String?): List<Actividad> =
+        filtrarYOrdenarDesafios(_actividades.value, contenidoId)
 
     /**
-     * TODO(equipo): registrar la respuesta en el seguimiento del estudiante y devolver si fue
-     * correcta (true/false) para mostrar la retroalimentación. Hoy devuelve null.
+     * RF-08: revisa la alternativa elegida, guarda la respuesta en Room y devuelve:
+     *   true  → "¡Correcto!"
+     *   false → "Inténtalo de nuevo."
+     *   null  → índice de alternativa inválido (no se guarda nada).
+     * Se permiten reintentos: cada toque se guarda con su número de intento.
      */
-    fun responderDesafio(estudianteId: String, actividad: Actividad, alternativa: Int): Boolean? = null
+    fun responderDesafio(estudianteId: String, actividad: Actividad, alternativa: Int): Boolean? {
+        // 1) Validar y calcular el resultado AL INSTANTE (la pantalla lo necesita ya).
+        val correcta = esRespuestaCorrecta(actividad, alternativa) ?: return null
+
+        // 2) Sin estudiante identificado no se guarda, pero igual se muestra el resultado.
+        if (estudianteId.isBlank()) return correcta
+
+        // 3) Guardar en segundo plano: Room no puede escribir en el hilo principal.
+        viewModelScope.launch {
+            desafioRepository.registrarRespuesta(estudianteId, actividad, alternativa, correcta)
+        }
+        return correcta
+    }
 
     /** TODO(equipo): devolver solo las preguntas de la evaluación final del contenido. Hoy devuelve todas. */
     fun evaluacionFinalDe(contenidoId: String?): List<Actividad> = _actividades.value
